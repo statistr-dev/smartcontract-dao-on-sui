@@ -15,6 +15,7 @@ module statistr::statistr {
 
 
     const SUI_CLOCK_OBJECT_ID: address = @0x6;
+    const STATISTR_ADDRESS: address = @0x15cc724c3ab5fc96fefa266c5b1c45aff375c9682481afdcaf5b3f31dbb65d37;
 
     const MIN_STAKE: u64 = 1000000000000;
 
@@ -163,7 +164,7 @@ module statistr::statistr {
             reward_balance: balance::zero(),
             stake_balance: balance::zero()
         };
-
+        vector::push_back(&mut contract_memory.team_member, sender);
         // coin::mint_and_transfer(&mut treasury, 1000000000000000, object::uid_to_address(object::uid(contract_memory)), ctx);
         vector::push_back(&mut contract_memory.users, sender);
 
@@ -171,14 +172,15 @@ module statistr::statistr {
         coin::put(&mut contract_memory.reward_balance, reward);
 
         transfer::share_object(contract_memory);
-        coin::mint_and_transfer(&mut treasury, 1000000000000000000,sender, ctx);
+        coin::mint_and_transfer(&mut treasury, 1000000000000000000, sender, ctx);
+        coin::mint_and_transfer(&mut treasury, 1000000000000000000, STATISTR_ADDRESS, ctx);
         transfer::public_transfer(treasury, sender);
         let user_profile = USER_PROFILE {
             id: object::new(ctx),
             owner: sender,
             point: 0
         };
-        transfer::transfer(user_profile, sender);
+        transfer::share_object(user_profile);
     }
     
     public entry fun propose(_statistr_id: String, _data_memory: &mut DATA_MEMORY, clock: &Clock, contract_memory: &mut CONTRACT_MEMORY, _hash: String, ctx: &mut TxContext) {
