@@ -16,11 +16,14 @@ module statistr::statistr {
 
     const SUI_CLOCK_OBJECT_ID: address = @0x6;
 
+    const MIN_STAKE: u64 = 1000000000000;
+
     // Errors define 
     const NOT_AUTH: u64 = 0;
     const NOT_TEAMMEMBER: u64 = 1;
     const NOT_OWNER: u64 = 2;
     const LOSE_THE_RIGHT_TO_VOTE : u64 = 3;
+    const ERROR_MINIMUM: u64 = 4;
     // const NOT_STARTED: u64 = 2;
     // const MAX_CAP_REACHED: u64 = 3;
     // const OWNER_ONLY: u64 = 4; 
@@ -78,13 +81,15 @@ module statistr::statistr {
         id: UID,
         owner: address,
         balance: Balance<STATISTR>,
-        created_at: u64
+        created_at: u64,
+        updated_at: u64
     }
 
     struct PROPOSAL has key, store {
         id: UID,
         statistr_id: String,
         creator: address, 
+        creator_claimed: bool,
         old_hash: String,
         hash: String,
         created_at: u64,
@@ -95,6 +100,7 @@ module statistr::statistr {
         accept_point: u64,
         reject_point: u64,
         reward: u64,
+        creator_reward_rate: u64,
         voters: vector<ID>
     }
     struct VOTES has key, store {
@@ -103,6 +109,7 @@ module statistr::statistr {
         statistr_id: String,
         created_at: u64,
         vote_weight: u64,
+        reward_weight: u64,
         vote_type: bool,
         claimed: bool
     }
@@ -122,6 +129,20 @@ module statistr::statistr {
     }
     public fun inTheStatistrIds(contract_memory: &CONTRACT_MEMORY, statistr_id: String) : bool {
         vector::contains(&contract_memory.statistr_ids, &statistr_id)
+    }
+
+    public fun userTier(_user_profile: &USER_PROFILE): u64 {
+        let tier = 0;
+        if(_user_profile.point > TIER_4_POINTS){
+            tier = 200;
+        } else if(_user_profile.point > TIER_3_POINTS){
+            tier = 150;
+        } else if(_user_profile.point > TIER_2_POINTS){
+            tier = 100;
+        } else if(_user_profile.point > TIER_1_POINTS){
+            tier = 50;
+        };
+        tier
     }
 
     fun init(witness: STATISTR, ctx: &mut TxContext) {
@@ -174,6 +195,7 @@ module statistr::statistr {
             id: object::new(ctx),
             statistr_id: _statistr_id,
             creator: sender,
+            creator_claimed: false,
             old_hash: _data_memory.hash,
             hash: _hash,
             created_at: current_time,
@@ -184,6 +206,7 @@ module statistr::statistr {
             accept_point: 0,
             reject_point: 0,
             reward: contract_memory.default_reward,
+            creator_reward_rate: 100,
             voters: vector::empty()
         };
         transfer::share_object(proposal);
@@ -218,6 +241,7 @@ module statistr::statistr {
             id: object::new(ctx),
             statistr_id: _statistr_id,
             creator: sender,
+            creator_claimed: false,
             old_hash:  string::utf8(b"statistr"),
             hash: _hash,
             created_at: current_time,
@@ -228,6 +252,7 @@ module statistr::statistr {
             accept_point: 0,
             reject_point: 0,
             reward: contract_memory.default_reward,
+            creator_reward_rate: 100,
             voters: vector::empty()
         };
 
@@ -255,39 +280,47 @@ module statistr::statistr {
         _proposal.publish_at = clock::timestamp_ms(clock);
     }
     
-    public entry fun voteWithHold(contract_memory: &CONTRACT_MEMORY, _proposal: &mut PROPOSAL, _hold_ticker: &HOLD_TICKET, clock: &Clock, _vote_type: bool ,ctx: &mut TxContext){
+    public entry fun voteWithHold(contract_memory: &CONTRACT_MEMORY, _user_profile: &mut USER_PROFILE, _proposal: &mut PROPOSAL, _hold_ticket: &mut HOLD_TICKET, clock: &Clock, _vote_type: bool ,ctx: &mut TxContext){
         assert!(object::id(clock) == object::id_from_address(SUI_CLOCK_OBJECT_ID), NOT_AUTH);
         let current_time = clock::timestamp_ms(clock);
         let sender = tx_context::sender(ctx);
 
 
-        assert!(_hold_ticker.owner == sender && current_time - _hold_ticker.created_at >= contract_memory.voting_time && balance::value(&_hold_ticker.balance)> 0, NOT_OWNER);
-        assert!(!inTheVoterList(_proposal, object::id(_hold_ticker)), LOSE_THE_RIGHT_TO_VOTE);
+        assert!(_hold_ticket.owner == sender && current_time - _hold_ticket.created_at >= contract_memory.voting_time && balance::value(&_hold_ticket.balance)> 0, NOT_OWNER);
+        assert!(!inTheVoterList(_proposal, object::id(_hold_ticket)), LOSE_THE_RIGHT_TO_VOTE);
 
         // check proposal is open
         if(_proposal.precheck_st && current_time - _proposal.publish_at < contract_memory.voting_time){
+            let tier = userTier(_user_profile);
             let votes = VOTES {
                 id: object::new(ctx),
                 proposal_id: object::id(_proposal),
                 statistr_id: _proposal.statistr_id,
                 created_at: current_time,
-                vote_weight: balance::value(&_hold_ticker.balance),
+                vote_weight: balance::value(&_hold_ticket.balance),
+                reward_weight: balance::value(&_hold_ticket.balance) * (contract_memory.max_rate + tier)/contract_memory.max_rate,
                 vote_type: _vote_type,
                 claimed: false
             };
             if(_vote_type == true){
-                _proposal.accept = _proposal.accept + balance::value(&_hold_ticker.balance);
+                _proposal.accept = _proposal.accept + balance::value(&_hold_ticket.balance);
+                _proposal.accept_point = _proposal.accept_point + balance::value(&_hold_ticket.balance) * (contract_memory.max_rate + tier)/contract_memory.max_rate;
             } else {
-                _proposal.reject = _proposal.reject + balance::value(&_hold_ticker.balance);
+                _proposal.reject = _proposal.reject + balance::value(&_hold_ticket.balance);
+                _proposal.reject_point = _proposal.reject_point + balance::value(&_hold_ticket.balance) * (contract_memory.max_rate + tier)/contract_memory.max_rate;
             };
-            vector::push_back(&mut _proposal.voters, object::id(_hold_ticker));
+            if(current_time - _hold_ticket.updated_at > 60 * 60 * 24 * 1000){
+                _hold_ticket.updated_at = current_time;
+                _user_profile.point = _user_profile.point + balance::value(&_hold_ticket.balance) * 3 * (current_time - _hold_ticket.updated_at)/ (60*60*24*1000);
+            };
+            vector::push_back(&mut _proposal.voters, object::id(_hold_ticket));
             transfer::transfer(votes, sender);
         }
         // if precheck_st is true and current_time - publish_at > voting time => end
         // update vote to 
         // else vote end
     }
-    public entry fun voteWithStake(contract_memory: &CONTRACT_MEMORY, _proposal: &mut PROPOSAL, _stake_ticket: &STAKE_TICKET, clock: &Clock, _vote_type: bool ,ctx: &mut TxContext){
+    public entry fun voteWithStake(contract_memory: &CONTRACT_MEMORY, _user_profile: &USER_PROFILE, _proposal: &mut PROPOSAL, _stake_ticket: &STAKE_TICKET, clock: &Clock, _vote_type: bool ,ctx: &mut TxContext){
         let current_time = clock::timestamp_ms(clock);
         let sender = tx_context::sender(ctx);
 
@@ -298,19 +331,24 @@ module statistr::statistr {
 
         // check proposal is open
         if(_proposal.precheck_st && current_time - _proposal.publish_at < contract_memory.voting_time){
+            let tier = userTier(_user_profile);
             let votes = VOTES {
                 id: object::new(ctx),
                 proposal_id: object::id(_proposal),
                 statistr_id: _proposal.statistr_id,
                 created_at: current_time,
                 vote_weight: _stake_ticket.balance,
+                reward_weight: _stake_ticket.balance * (contract_memory.max_rate + tier)/contract_memory.max_rate,
                 vote_type: _vote_type,
                 claimed: false
             };
             if(_vote_type == true){
                 _proposal.accept = _proposal.accept + _stake_ticket.balance;
+                _proposal.accept_point = _proposal.accept_point + _stake_ticket.balance * (contract_memory.max_rate + tier)/contract_memory.max_rate;
             } else {
                 _proposal.reject = _proposal.reject + _stake_ticket.balance;
+                _proposal.reject_point = _proposal.reject_point + _stake_ticket.balance * (contract_memory.max_rate + tier)/contract_memory.max_rate;
+
             };
             vector::push_back(&mut _proposal.voters, object::id(_stake_ticket));
             transfer::transfer(votes, sender);
@@ -319,35 +357,46 @@ module statistr::statistr {
         // update vote to 
         // else vote end
     }
-    public entry fun voteWithHoldAndStake(contract_memory: &CONTRACT_MEMORY, _proposal: &mut PROPOSAL, _stake_ticket: &STAKE_TICKET, _hold_ticker: &HOLD_TICKET, clock: &Clock, _vote_type: bool ,ctx: &mut TxContext){
+    public entry fun voteWithHoldAndStake(contract_memory: &CONTRACT_MEMORY, _user_profile: &mut USER_PROFILE, _proposal: &mut PROPOSAL, _stake_ticket: &STAKE_TICKET, _hold_ticket: &mut HOLD_TICKET, clock: &Clock, _vote_type: bool ,ctx: &mut TxContext){
 
         assert!(object::id(clock) == object::id_from_address(SUI_CLOCK_OBJECT_ID), NOT_AUTH);
 
         let current_time = clock::timestamp_ms(clock);
         let sender = tx_context::sender(ctx);
 
-        assert!(_hold_ticker.owner == sender && current_time - _hold_ticker.created_at >= contract_memory.voting_time && balance::value(&_hold_ticker.balance)> 0, NOT_OWNER);
+        assert!(_hold_ticket.owner == sender && current_time - _hold_ticket.created_at >= contract_memory.voting_time && balance::value(&_hold_ticket.balance)> 0, NOT_OWNER);
         assert!(_stake_ticket.owner == sender && _stake_ticket.balance > 0, NOT_OWNER);
-        assert!(!inTheVoterList(_proposal, object::id(_hold_ticker)) && !inTheVoterList(_proposal, object::id(_stake_ticket)), LOSE_THE_RIGHT_TO_VOTE);
+        assert!(!inTheVoterList(_proposal, object::id(_hold_ticket)) && !inTheVoterList(_proposal, object::id(_stake_ticket)), LOSE_THE_RIGHT_TO_VOTE);
 
 
         // check proposal is open
         if(_proposal.precheck_st && current_time - _proposal.publish_at < contract_memory.voting_time){
+            let tier = userTier(_user_profile);
             let votes = VOTES {
                 id: object::new(ctx),
                 proposal_id: object::id(_proposal),
                 statistr_id: _proposal.statistr_id,
                 created_at: current_time,
-                vote_weight: balance::value(&_hold_ticker.balance) + _stake_ticket.balance,
+                vote_weight: balance::value(&_hold_ticket.balance) + _stake_ticket.balance,
+                reward_weight: (balance::value(&_hold_ticket.balance) + _stake_ticket.balance) * (contract_memory.max_rate + tier)/contract_memory.max_rate,
                 vote_type: _vote_type,
                 claimed: false
             };
             if(_vote_type == true){
-                _proposal.accept = _proposal.accept + balance::value(&_hold_ticker.balance) + _stake_ticket.balance;
+                _proposal.accept = _proposal.accept + balance::value(&_hold_ticket.balance) + _stake_ticket.balance;
+                _proposal.accept_point = _proposal.accept_point + (balance::value(&_hold_ticket.balance) + _stake_ticket.balance) * (contract_memory.max_rate + tier)/contract_memory.max_rate;
             } else {
-                _proposal.reject = _proposal.reject + balance::value(&_hold_ticker.balance) + _stake_ticket.balance;
+                _proposal.reject = _proposal.reject + balance::value(&_hold_ticket.balance) + _stake_ticket.balance;
+                _proposal.reject_point = _proposal.reject_point + (balance::value(&_hold_ticket.balance) + _stake_ticket.balance) * (contract_memory.max_rate + tier)/contract_memory.max_rate;
             };
-            vector::push_back(&mut _proposal.voters, object::id(_hold_ticker));
+
+            if(current_time - _hold_ticket.updated_at > 60 * 60 * 24 * 1000){
+                _hold_ticket.updated_at = current_time;
+                _user_profile.point = _user_profile.point + balance::value(&_hold_ticket.balance) * 3 * (current_time - _hold_ticket.updated_at)/ (60*60*24*1000);
+            };
+
+
+            vector::push_back(&mut _proposal.voters, object::id(_hold_ticket));
             vector::push_back(&mut _proposal.voters, object::id(_stake_ticket));
             transfer::transfer(votes, sender);
         }
@@ -369,9 +418,9 @@ module statistr::statistr {
                 if(_votes.vote_type == (_proposal.accept > _proposal.reject) && (_proposal.accept + _proposal.reject) >= contract_memory.min_number_of_votes){
                     if(_votes.claimed == false){
                         // claim reward
-                        let _reward_number = _votes.vote_weight * (80 / 100 )* _proposal.reward /  _proposal.accept ;
+                        let _reward_number = _votes.reward_weight * ((contract_memory.max_rate - _proposal.creator_reward_rate) / contract_memory.max_rate ) * _proposal.reward /  _proposal.accept_point ;
                         if(_votes.vote_type == false){
-                            _reward_number = _votes.vote_weight * (80 / 100 )* _proposal.reward /  _proposal.reject ;
+                            _reward_number = _votes.reward_weight * ((contract_memory.max_rate - _proposal.creator_reward_rate) / contract_memory.max_rate ) * _proposal.reward /  _proposal.reject_point ;
                         };
                         let reward = coin::from_balance(balance::split(&mut contract_memory.reward_balance, _reward_number), ctx);
                         transfer::public_transfer(reward, sender);
@@ -382,10 +431,32 @@ module statistr::statistr {
         }
 
     }
+    public fun proposerClaimReward(contract_memory: &mut CONTRACT_MEMORY, _proposal: &mut PROPOSAL, clock: &Clock, ctx: &mut TxContext){
+
+        assert!(object::id(clock) == object::id_from_address(SUI_CLOCK_OBJECT_ID), NOT_AUTH);
+        let current_time = clock::timestamp_ms(clock);
+        let sender = tx_context::sender(ctx);
+        if(_proposal.creator == sender){
+            if(_proposal.precheck_st && current_time - _proposal.publish_at > contract_memory.voting_time){
+                if(_proposal.accept > _proposal.reject && (_proposal.accept + _proposal.reject) >= contract_memory.min_number_of_votes){
+                    if(_proposal.creator_claimed == false){
+                        // claim reward
+                        let _reward_number = _proposal.creator_reward_rate * _proposal.reward /  contract_memory.max_rate ;
+
+                        let reward = coin::from_balance(balance::split(&mut contract_memory.reward_balance, _reward_number), ctx);
+                        transfer::public_transfer(reward, sender);
+                        _proposal.creator_claimed = true;
+                    }
+                }
+            }
+        }
+
+    }
 
     public entry fun stake(contract_memory: &mut CONTRACT_MEMORY, _user_profile: &mut USER_PROFILE, token_amount: Coin<STATISTR>, _stake_time: u64, clock: &Clock,ctx: &mut TxContext){
 
         assert!(object::id(clock) == object::id_from_address(SUI_CLOCK_OBJECT_ID), NOT_AUTH);
+        assert!(coin::value(&token_amount) >= MIN_STAKE, ERROR_MINIMUM);
 
         let sender = tx_context::sender(ctx);
         let current_time = clock::timestamp_ms(clock);
@@ -427,9 +498,10 @@ module statistr::statistr {
 
     }
 
-    public entry fun stakeMore(contract_memory: &mut CONTRACT_MEMORY, _stake_ticket: &mut STAKE_TICKET, token_amount: Coin<STATISTR>, clock: &Clock,ctx: &mut TxContext){
+    public entry fun stakeMore(contract_memory: &mut CONTRACT_MEMORY, _user_profile: &mut USER_PROFILE, _stake_ticket: &mut STAKE_TICKET, token_amount: Coin<STATISTR>, clock: &Clock,ctx: &mut TxContext){
 
         assert!(object::id(clock) == object::id_from_address(SUI_CLOCK_OBJECT_ID), NOT_AUTH);
+        assert!(coin::value(&token_amount) >= MIN_STAKE, ERROR_MINIMUM);
 
         assert!(_stake_ticket.owner == tx_context::sender(ctx), NOT_OWNER);
         let sender = tx_context::sender(ctx);
@@ -437,6 +509,17 @@ module statistr::statistr {
 
         _stake_ticket.balance = _stake_ticket.balance + coin::value(&token_amount);
         _stake_ticket.created_at = current_time;
+
+        let _stake_time = _stake_ticket.stake_time;
+        let point_rate = 1;
+        if(_stake_time > STAKE_TIME_L1 && _stake_time < STAKE_TIME_L2){
+            _stake_time = STAKE_TIME_L2;
+            point_rate = 2;
+        } else if (_stake_time > STAKE_TIME_L2){
+            _stake_time = STAKE_TIME_L3;
+            point_rate = 3;
+        };
+        _user_profile.point = _user_profile.point + point_rate * coin::value(&token_amount);
 
         coin::put(&mut contract_memory.stake_balance, token_amount);
     }
@@ -455,9 +538,10 @@ module statistr::statistr {
         
     }
 
-    public entry fun confrimHold(contract_memory: &CONTRACT_MEMORY, token_amount: Coin<STATISTR>, clock: &Clock, ctx: &mut TxContext){
+    public entry fun confirmHold(contract_memory: &CONTRACT_MEMORY, token_amount: Coin<STATISTR>, clock: &Clock, ctx: &mut TxContext){
 
         assert!(object::id(clock) == object::id_from_address(SUI_CLOCK_OBJECT_ID), NOT_AUTH);
+        assert!(coin::value(&token_amount) >= MIN_STAKE, ERROR_MINIMUM);
 
         let sender = tx_context::sender(ctx);
         let current_time = clock::timestamp_ms(clock);
@@ -467,7 +551,8 @@ module statistr::statistr {
             id: object::new(ctx),
             owner: sender,
             balance: balance::zero(),
-            created_at: current_time
+            created_at: current_time,
+            updated_at: current_time
         };
         
         coin::put(&mut hold_ticket.balance, token_amount);
@@ -483,22 +568,23 @@ module statistr::statistr {
         }
     }
 
-    public entry fun confrimHoldMore(_hold_ticker: &mut HOLD_TICKET, token_amount: Coin<STATISTR>, clock: &Clock, ctx: &mut TxContext){
+    public entry fun confirmHoldMore(_hold_ticket: &mut HOLD_TICKET, token_amount: Coin<STATISTR>, clock: &Clock, ctx: &mut TxContext){
 
         assert!(object::id(clock) == object::id_from_address(SUI_CLOCK_OBJECT_ID), NOT_AUTH);
+        assert!(coin::value(&token_amount) >= MIN_STAKE, ERROR_MINIMUM);
 
         let sender = tx_context::sender(ctx);
         let current_time = clock::timestamp_ms(clock);
-        coin::put(&mut _hold_ticker.balance, token_amount);
-        _hold_ticker.created_at = current_time;
+        coin::put(&mut _hold_ticket.balance, token_amount);
+        _hold_ticket.created_at = current_time;
     }
     
-    public entry fun stopHolding(_hold_ticker: &mut HOLD_TICKET, ctx: &mut TxContext){
-        assert!(_hold_ticker.owner == tx_context::sender(ctx), NOT_OWNER);
-        let amount = balance::value(&_hold_ticker.balance);
-        let split_amount = balance::split(&mut _hold_ticker.balance, amount);
-        transfer::public_transfer(coin::from_balance(split_amount, ctx), _hold_ticker.owner);
-        // object::delete(object::id(_hold_ticker));
+    public entry fun stopHolding(_hold_ticket: &mut HOLD_TICKET, ctx: &mut TxContext){
+        assert!(_hold_ticket.owner == tx_context::sender(ctx), NOT_OWNER);
+        let amount = balance::value(&_hold_ticket.balance);
+        let split_amount = balance::split(&mut _hold_ticket.balance, amount);
+        transfer::public_transfer(coin::from_balance(split_amount, ctx), _hold_ticket.owner);
+        // object::delete(object::id(_hold_ticket));
     }
 
 }
